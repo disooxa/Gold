@@ -67,6 +67,12 @@ h2{font-size:13px;margin:0 0 10px;color:var(--mut);text-transform:uppercase;lett
 .calls{display:flex;flex-wrap:wrap;gap:5px;margin:4px 0 10px}
 .call{font-size:11px;font-weight:700;padding:4px 7px;border-radius:7px;font-variant-numeric:tabular-nums}
 .call.ok{background:#123821;color:var(--up)}.call.no{background:#3a1416;color:var(--dn)}.call.fl{background:#232c38;color:var(--mut)}
+.sighead{display:flex;gap:12px;align-items:center}
+.sigbadge{font-size:20px;font-weight:900;letter-spacing:1px;padding:10px 14px;border-radius:12px;min-width:84px;text-align:center}
+.sigbadge.b{background:#14532d;color:#bbf7d0}.sigbadge.s{background:#7f1d1d;color:#fecaca}.sigbadge.w{background:#232c38;color:var(--mut)}
+.siglv{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px;background:var(--card2);border-radius:10px;padding:10px}
+.siglv4{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px;background:var(--card2);border-radius:10px;padding:10px}
+@media(max-width:420px){.siglv4{grid-template-columns:repeat(2,1fr)}}
 .ptitle{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px;font-weight:600}
 .lsbar{display:flex;height:22px;border-radius:7px;overflow:hidden;font-size:11px;font-weight:700}
 .lsbar div{display:flex;align-items:center;padding:0 8px;white-space:nowrap;transition:width .6s}
@@ -103,6 +109,11 @@ footer a{color:var(--mut)}
         <div class="chip"><div class="k">+30 min</div><div class="v" id="f30">—</div><div class="d" id="f30d"></div></div>
       </div>
     </div>
+  </section>
+
+  <section class="card" id="sigcard">
+    <div class="row" style="margin-bottom:8px"><h2 style="margin:0">Trade signal</h2><span class="tiny mut">next 30 min</span></div>
+    <div id="signalbox"><div class="small skel">The first signal appears with the first forecast.</div></div>
   </section>
 
   <section class="card">
@@ -450,11 +461,13 @@ function maybeForecast(){
       S.forecasts.push({ t0: S.cur.t0, p0: S.cur.p0, t5: S.cur.t5, t15: S.cur.t15, t30: S.cur.t30, s: S.cur.s });
       if(S.forecasts.length > 400) S.forecasts = S.forecasts.slice(-400);
       LS.set("xauf_fc", S.forecasts);
-      renderForecast();
+      recordSignal(computeSignal(S.cur));
+      renderForecast(); renderSignal();
     }
   }
 }
 function evaluate(){
+  evalSignals();
   var last = S.ticks[S.ticks.length-1]; if(!last) return;
   var changed = false;
   S.forecasts.forEach(function(f){
@@ -468,6 +481,124 @@ function evaluate(){
     });
   });
   if(changed){ LS.set("xauf_fc", S.forecasts); renderTrack(); renderPredChart(); }
+}
+
+// ---------- trade signal (BUY / SELL / WAIT) ----------
+S.signals = LS.get("xauf_sig", []).filter(function(x){ return x && x.t0 > Date.now() - 48*60*MIN; });
+function computeSignal(f){
+  var P = f.p0, sd15 = f.path[15].sd, sd30 = f.path[30].sd, lv = levels(P);
+  var fl = flowStats(15) || flowStats(60);
+  var flowB = fl && fl.vol ? fl.buy : 0.5;
+  var res = lv.filter(function(l){ return l.v > P + 0.3; }).sort(function(a,b){ return a.v-b.v; })[0];
+  var sup = lv.filter(function(l){ return l.v < P - 0.3; }).sort(function(a,b){ return b.v-a.v; })[0];
+  var sig = { t0: f.t0, p0: P, side: "WAIT", strength: Math.round(Math.abs(f.s)*100), reasons: [] };
+  var top = f.comps.slice().sort(function(a,b){ return Math.abs(b.v*b.w) - Math.abs(a.v*a.w); }).slice(0, 2);
+  var buyOk = f.s >= 0.22 && f.pu >= 0.54 && flowB > 0.4;
+  var sellOk = f.s <= -0.22 && f.pu <= 0.46 && flowB < 0.6;
+  if(f.stale) buyOk = sellOk = false;
+  if(buyOk || sellOk){
+    var dir = buyOk ? 1 : -1;
+    var strong = Math.abs(f.s) >= 0.45;
+    // entry: strong signal = at market; otherwise wait for a small pullback (or the nearest level if it's close)
+    var pull = strong ? 0 : 0.5*sd15;
+    var lvl = dir > 0 ? sup : res;
+    var entry = P - dir*pull;
+    if(!strong && lvl && Math.abs(lvl.v - P) < 1.0*sd15) entry = lvl.v + dir*0.1*sd15;
+    var stop = entry - dir*1.2*sd30;
+    if(lvl){ var cand = lvl.v - dir*0.4*sd15, gap = dir*(entry - cand); if(gap > 0.6*sd30 && gap < 1.8*sd30) stop = cand; } // tuck the stop just beyond the level
+    var risk = Math.abs(entry - stop);
+    sig.side = dir > 0 ? "BUY" : "SELL";
+    sig.entry = +entry.toFixed(2); sig.stop = +stop.toFixed(2);
+    sig.tp1 = +(entry + dir*1.0*risk).toFixed(2); sig.tp2 = +(entry + dir*1.8*risk).toFixed(2);
+    sig.atMarket = strong || Math.abs(entry - P) < 0.15*sd15;
+    var dist = Math.abs(entry - P);
+    sig.fillProb = sig.atMarket ? 1 : clamp(2*(1 - Phi(dist/sd15)), 0, 1);
+    sig.validUntil = f.t0 + 30*MIN;
+    sig.reasons = top.filter(function(c){ return Math.sign(c.v) === dir; }).map(function(c){ return c.k.toLowerCase() + " (" + c.note + ")"; });
+  } else {
+    sig.buyAbove = res ? res.v : P + sd15;
+    sig.sellBelow = sup ? sup.v : P - sd15;
+    sig.why = f.stale ? "prices aren't updating" : Math.abs(f.s) < 0.22 ? "signals are mixed, so there is no clear edge" : "order flow disagrees with the forecast";
+  }
+  return sig;
+}
+function recordSignal(sig){
+  var last = S.signals[S.signals.length-1];
+  var active = last && !last.result && last.side !== "WAIT";
+  if(sig.side === "WAIT"){ S.cur.sig = sig; return; }
+  if(active && last.side === sig.side){ S.cur.sig = last; return; } // keep the running signal instead of spamming new ones
+  if(active && last.side !== sig.side){ closeSignal(last, "reversed", S.ticks[S.ticks.length-1].p); }
+  S.signals.push(sig); if(S.signals.length > 200) S.signals = S.signals.slice(-200);
+  LS.set("xauf_sig", S.signals); S.cur.sig = sig;
+}
+function closeSignal(x, why, price){
+  var dir = x.side === "BUY" ? 1 : -1;
+  x.result = why; x.closedAt = Date.now();
+  x.pnl = x.filled ? +(dir*(price - x.entry)).toFixed(2) : 0;
+}
+function evalSignals(){
+  var changed = false;
+  S.signals.forEach(function(x){
+    if(x.result || x.side === "WAIT") return;
+    var dir = x.side === "BUY" ? 1 : -1;
+    S.ticks.forEach(function(k){
+      if(x.result || k.t <= x.t0) return;
+      var hi = k.h != null ? k.h : k.p, lo = k.l != null ? k.l : k.p;
+      if(!x.filled){
+        if(k.t > x.t0 + 15*MIN){ closeSignal(x, "missed", k.p); changed = true; return; }
+        if((dir > 0 && lo <= x.entry) || (dir < 0 && hi >= x.entry) || x.atMarket){ x.filled = true; x.filledAt = k.t; changed = true; }
+        else return;
+      }
+      var hitStop = dir > 0 ? lo <= x.stop : hi >= x.stop;
+      var hitTp = dir > 0 ? hi >= x.tp1 : lo <= x.tp1;
+      if(hitStop){ closeSignal(x, "stop", x.stop); changed = true; }
+      else if(hitTp){ closeSignal(x, "target", x.tp1); changed = true; }
+      else if(k.t > x.t0 + 60*MIN){ closeSignal(x, "expired", k.p); changed = true; }
+    });
+  });
+  if(changed){ LS.set("xauf_sig", S.signals); renderSignal(); }
+}
+function renderSignal(){
+  var box = $("signalbox"); if(!box) return; clear(box);
+  var f = S.cur, sig = f && f.sig;
+  if(!sig){ box.appendChild(el("div",{cls:"small skel",text:"The first signal appears with the first forecast."})); return; }
+  var P = S.ticks.length ? S.ticks[S.ticks.length-1].p : sig.p0;
+  var col = sig.side === "BUY" ? "up" : sig.side === "SELL" ? "dn" : "mut";
+  var badge = el("div",{cls:"sigbadge " + (sig.side === "BUY" ? "b" : sig.side === "SELL" ? "s" : "w"), text: sig.side});
+  var headTxt;
+  if(sig.side === "WAIT"){
+    headTxt = "No good entry right now — " + sig.why + ".";
+  } else if(sig.result){
+    headTxt = sig.side + " signal from " + hhmm(sig.t0) + " finished: " + ({target:"target hit ✓", stop:"stopped out ✗", missed:"price never reached the entry", expired:"expired", reversed:"reversed"})[sig.result];
+  } else if(sig.atMarket || sig.filled){
+    headTxt = (sig.side === "BUY" ? "Good point to buy now" : "Good point to sell now") + " (around $" + fmt(sig.entry,2) + ").";
+  } else {
+    headTxt = (sig.side === "BUY" ? "Buy on a dip to $" : "Sell on a bounce to $") + fmt(sig.entry,2) + " — " + Math.round(sig.fillProb*100) + "% chance price gets there in the next 15 min.";
+  }
+  box.appendChild(el("div",{cls:"sighead"},[ badge, el("div",{},[ el("div",{cls:"headline",style:"margin:0",text: headTxt}), el("div",{cls:"tiny mut",text: sig.side === "WAIT" ? "Updated " + hhmm(sig.t0) + " · checks again every 5 minutes" : "Signal strength " + sig.strength + "% · issued " + hhmm(sig.t0) + (sig.result ? "" : " · valid until " + hhmm(sig.validUntil))}) ]) ]));
+  if(sig.side === "WAIT"){
+    box.appendChild(el("div",{cls:"siglv"},[
+      el("div",{},[ el("div",{cls:"tiny mut",text:"Consider buying if price breaks above"}), el("div",{cls:"up",style:"font-weight:700;font-size:16px",text:"$" + fmt(sig.buyAbove,2)}) ]),
+      el("div",{},[ el("div",{cls:"tiny mut",text:"Consider selling if price breaks below"}), el("div",{cls:"dn",style:"font-weight:700;font-size:16px",text:"$" + fmt(sig.sellBelow,2)}) ])
+    ]));
+  } else {
+    var dir = sig.side === "BUY" ? 1 : -1;
+    var rows = [["Entry", sig.entry, ""], ["Stop-loss", sig.stop, "dn"], ["Target 1", sig.tp1, "up"], ["Target 2", sig.tp2, "up"]];
+    box.appendChild(el("div",{cls:"siglv4"}, rows.map(function(r){
+      return el("div",{},[ el("div",{cls:"tiny mut",text:r[0]}), el("div",{cls:r[2],style:"font-weight:700;font-size:15px;font-variant-numeric:tabular-nums",text:"$" + fmt(r[1],2)}), el("div",{cls:"tiny mut",text: r[0] === "Entry" ? "now $" + fmt(P,2) : sgn(dir*(r[1] - sig.entry),2)}) ]);
+    })));
+    var rr = Math.abs(sig.tp1 - sig.entry)/Math.abs(sig.entry - sig.stop);
+    box.appendChild(el("div",{cls:"small",style:"margin-top:8px",text:"Why: " + (sig.reasons.length ? sig.reasons.join(", ") : "overall forecast leans " + (dir > 0 ? "up" : "down")) + ". Risk $" + fmt(Math.abs(sig.entry - sig.stop),2) + " to make $" + fmt(Math.abs(sig.tp1 - sig.entry),2) + "–" + fmt(Math.abs(sig.tp2 - sig.entry),2) + " (1:" + rr.toFixed(1) + "–1:" + (rr*1.8).toFixed(1) + ")."}));
+  }
+  // scorecard
+  var done = S.signals.filter(function(x){ return x.result && x.result !== "missed"; });
+  var wins = done.filter(function(x){ return x.result === "target" || (x.pnl > 0 && x.result !== "stop"); }).length;
+  var pnl = done.reduce(function(s,x){ return s + (x.pnl || 0); }, 0);
+  var missed = S.signals.filter(function(x){ return x.result === "missed"; }).length;
+  box.appendChild(el("div",{cls:"tiny mut",style:"margin-top:10px;border-top:1px solid var(--line);padding-top:8px",text: done.length
+    ? "Past signals (48h, this device): " + wins + " of " + done.length + " profitable · net " + sgn(pnl,2) + " $/oz" + (missed ? " · " + missed + " never reached entry" : "")
+    : "Past signals are scored here automatically: target hit, stop hit, or closed after 60 minutes."}));
+  box.appendChild(el("div",{cls:"tiny mut",style:"margin-top:4px",text:"Signals come from a statistical model, not a guarantee. Always use a stop-loss and only risk what you can afford to lose."}));
 }
 
 // ---------- rendering ----------
@@ -609,6 +740,8 @@ function renderChart(){
   var act = S.ticks.filter(function(x){ return x.t >= t0 - 2*MIN; }), f = S.cur;
   var fp = f ? f.path.map(function(p, i){ return { t: now + i*MIN, m: p.m, l: p.l1, u: p.u1 }; }) : [];
   var vals = act.map(function(x){ return x.p; }); fp.forEach(function(p){ vals.push(p.l, p.u); });
+  var sg = f && f.sig && f.sig.side !== "WAIT" && !f.sig.result ? f.sig : null;
+  if(sg) vals.push(sg.entry, sg.stop, sg.tp1);
   if(f){
     var hd = $("chead"); clear(hd);
     var up = f.s > 0.12, dn = f.s < -0.12, col = up ? "var(--up)" : dn ? "var(--dn)" : "var(--mut)";
@@ -639,6 +772,13 @@ function renderChart(){
     svg.appendChild(sv("circle",{cx:xn,cy:ly,r:5,fill:"#e8b84a",stroke:"#0a0e13","stroke-width":2}));
     svg.appendChild(sv("rect",{x:W-R+2,y:ly-9,width:R-4,height:18,rx:4,fill:"#e8b84a"}));
     var lt = sv("text",{x:W-R+R/2,y:ly+4,"text-anchor":"middle","font-size":10.5,"font-weight":700,fill:"#1a1405"}); lt.textContent = fmt(lp, 1); svg.appendChild(lt);
+  }
+  if(sg){
+    [[sg.entry, "#5b9dff", sg.side === "BUY" ? "Buy" : "Sell"], [sg.stop, "#ef4444", "Stop"], [sg.tp1, "#22c55e", "Target"]].forEach(function(l){
+      var y = Y(l[0]);
+      svg.appendChild(sv("line",{x1:L,x2:W-R,y1:y,y2:y,stroke:l[1],"stroke-width":1.2,"stroke-dasharray":"2 4",opacity:.9}));
+      var tx = sv("text",{x:L+4,y:y-3,fill:l[1],"font-size":10,"font-weight":700}); tx.textContent = l[2] + " " + fmt(l[0],1); svg.appendChild(tx);
+    });
   }
   cG = { t0: t0, t1: t1, L: L, R: R, act: act, fp: fp };
 }
