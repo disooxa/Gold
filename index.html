@@ -716,7 +716,7 @@ S.signals = LS.get("xauf_sig", []).filter(function(x){ return x && x.t0 > Date.n
 var DEF_STRAT = { mode: "trend", th: 0.22, sm: 1.2, rr: 1, sess: "all", name: "Default rules" };
 S.strat = LS.get("xauf_strat", null) || DEF_STRAT;
 function inSession(t, sess){ if(sess !== "ldnny") return true; var h = new Date(t).getUTCHours(); return h >= 7 && h < 20; }
-function stratLabel(st){ return ({trend:"Follow the move", revert:"Fade the move", breakout:"30-min breakout"})[st.mode] + " · stop " + st.sm + "× · target " + st.rr + "R" + (st.sess === "ldnny" ? " · London/NY hours only" : ""); }
+function stratLabel(st){ return ({trend:"Follow the move", revert:"Fade the move", breakout:"30-min breakout"})[st.mode] + (st.mode === "breakout" ? "" : " (" + (st.th >= 0.45 ? "strict" : st.th >= 0.3 ? "medium" : "loose") + " entry)") + " · stop " + st.sm + "× · target " + st.rr + "R" + (st.sess === "ldnny" ? " · London/NY hours only" : ""); }
 function computeSignal(f){
   var st = S.strat || DEF_STRAT;
   var P = f.p0, sd15 = f.path[15].sd, sd30 = f.path[30].sd, lv = levels(P);
