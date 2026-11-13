@@ -209,11 +209,11 @@ footer a{color:var(--mut)}
 
   <section class="card" id="btcard">
     <div class="row" style="margin-bottom:8px;flex-wrap:wrap;gap:8px"><h2 style="margin:0">Backtest</h2>
-      <div style="display:flex;gap:6px" id="btdays"><button class="btn" data-d="1">1 day</button><button class="btn" data-d="3">3 days</button><button class="btn" data-d="7">7 days</button></div>
+      <div style="display:flex;gap:6px" id="btdays"><button class="btn" data-d="1">1 day</button><button class="btn" data-d="3">3 days</button><button class="btn" data-d="7">7 days</button><button class="btn" data-d="14">14 days</button><button class="btn" data-d="30">30 days</button></div>
     </div>
     <div class="small mut">Test the trade-signal rules on past gold prices. Spread per trade (your Exness gold spread, $/oz):
       <input id="btspread" inputmode="decimal" value="0.30" style="width:64px;background:#0b1118;border:1px solid var(--line);color:var(--txt);border-radius:6px;padding:3px 6px;font-size:13px"></div>
-    <div id="btout" style="margin-top:8px"><div class="small skel">Pick a period to run the backtest. 7 days takes about 30 seconds.</div></div>
+    <div id="btout" style="margin-top:8px"><div class="small skel">Pick a period to run the backtest. 7 days takes about 30 seconds, 30 days about 1–2 minutes. For the strategy lab, 30 days gives the most reliable answer.</div></div>
   </section>
 
   <section class="card">
@@ -946,33 +946,37 @@ function btStats(r){
 }
 function btRun(bars, spread){ var D = btPre(bars); S.btData = D; return btSim(D, S.strat || DEF_STRAT, spread); }
 function btLab(spread){
-  var D = S.btData, n = D.pre.length, cut = Math.floor(n*0.7), res = [];
+  var D = S.btData, n = D.pre.length, q = Math.floor(n/4), cuts = [0, q, 2*q, 3*q, n], res = [];
   ["trend","revert","breakout"].forEach(function(mode){
     (mode === "breakout" ? [0] : [0.2, 0.3, 0.45]).forEach(function(th){
       [0.8, 1.2, 1.6].forEach(function(sm){ [1, 1.5, 2].forEach(function(rr){ ["all","ldnny"].forEach(function(sess){
         var st = { mode: mode, th: th, sm: sm, rr: rr, sess: sess };
-        var a = btStats(btSim(D, st, spread, 0, cut));
-        if(a.n < 8 || a.net <= 0) return;
-        res.push({ st: st, train: a, score: (a.pf - 1)*Math.sqrt(a.n) });
+        var parts = [0,1,2].map(function(k){ return btStats(btSim(D, st, spread, cuts[k], cuts[k+1])); });
+        var tr = btStats(btSim(D, st, spread, 0, cuts[3]));
+        var good = parts.filter(function(p){ return p.net > 0; }).length;
+        if(tr.n < 10 || tr.net <= 0 || good < 2) return;
+        res.push({ st: st, train: tr, good: good, score: (tr.pf - 1)*Math.sqrt(tr.n)*(good/3) });
       }); }); });
     });
   });
   res.sort(function(a,b){ return b.score - a.score; });
   res = res.slice(0, 5);
-  res.forEach(function(r){ r.test = btStats(btSim(D, r.st, spread, cut, n)); });
-  return { top: res, trainDays: (D.pre[cut-1].t - D.pre[0].t)/864e5, testDays: (D.pre[n-1].t - D.pre[cut].t)/864e5 };
+  res.forEach(function(r){ r.test = btStats(btSim(D, r.st, spread, cuts[3], n)); });
+  return { top: res, trainDays: (D.pre[cuts[3]-1].t - D.pre[0].t)/864e5, testDays: (D.pre[n-1].t - D.pre[cuts[3]].t)/864e5 };
 }
 function labRender(L, spread){
   var box = $("labout"); clear(box);
   var best = L.top[0];
   var pass = best && best.test.n >= 5 && best.test.net > 0 && best.test.pf > 1.15;
   box.appendChild(el("div",{cls:"headline"},[ el("span",{cls: pass ? "up" : "dn", text: !best ? "No version of the rules made money even on the training days." : pass ? "Found a version that also made money on days it never saw." : "No version held up on the unseen days — gold was too random in this period."}) ]));
-  box.appendChild(el("div",{cls:"tiny mut",text:"Tested 126 versions on the first " + L.trainDays.toFixed(1) + " days, then checked the best 5 on the last " + L.testDays.toFixed(1) + " days, which they never saw. Only the unseen-days result counts."}));
+  box.appendChild(el("div",{cls:"tiny mut",text:"Tested 126 versions on the first " + L.trainDays.toFixed(1) + " days (split into 3 parts — a version had to make money in at least 2 of them), then checked the best 5 on the last " + L.testDays.toFixed(1) + " days, which they never saw. Only the unseen-days result counts." + (L.testDays < 3 ? " Tip: run 30 days for a much more reliable test." : "")}));
   if(L.top.length){
     var tb = el("table",{cls:"tr",style:"margin-top:8px"});
     tb.appendChild(el("tr",{},[el("th",{text:"Strategy"}),el("th",{text:"Unseen trades"}),el("th",{text:"Win"}),el("th",{text:"Net $/oz"})]));
     L.top.forEach(function(r, k){
-      tb.appendChild(el("tr",{},[ el("td",{text:(k+1) + ". " + stratLabel(r.st), style:"white-space:normal"}), el("td",{text:String(r.test.n)}), el("td",{text: r.test.n ? Math.round(r.test.win*100) + "%" : "—"}), el("td",{cls: cls(r.test.net), text: sgn(r.test.net,2)}) ]));
+      var useB = el("button",{cls:"btn",text:"Paper-trade this",style:"margin-top:4px;font-size:11px;padding:3px 7px"});
+      useB.onclick = function(){ var st = Object.assign({}, r.st, { name: "Paper-trading: " + stratLabel(r.st) }); S.strat = st; LS.set("xauf_strat", st); useB.textContent = "✓ Live signals use this"; renderStrat(); liveUpdate(); };
+      tb.appendChild(el("tr",{},[ el("td",{style:"white-space:normal"},[ document.createTextNode((k+1) + ". " + stratLabel(r.st)), el("br"), useB ]), el("td",{text:String(r.test.n)}), el("td",{text: r.test.n ? Math.round(r.test.win*100) + "%" : "—"}), el("td",{cls: cls(r.test.net), text: sgn(r.test.net,2)}) ]));
     });
     box.appendChild(tb);
   }
