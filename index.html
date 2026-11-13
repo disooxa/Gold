@@ -206,6 +206,15 @@ footer a{color:var(--mut)}
     <ul class="news" id="news"><li class="skel small">Loading headlines…</li></ul>
   </section>
 
+  <section class="card" id="btcard">
+    <div class="row" style="margin-bottom:8px;flex-wrap:wrap;gap:8px"><h2 style="margin:0">Backtest</h2>
+      <div style="display:flex;gap:6px" id="btdays"><button class="btn" data-d="1">1 day</button><button class="btn" data-d="3">3 days</button><button class="btn" data-d="7">7 days</button></div>
+    </div>
+    <div class="small mut">Test the trade-signal rules on past gold prices. Spread per trade (your Exness gold spread, $/oz):
+      <input id="btspread" inputmode="decimal" value="0.30" style="width:64px;background:#0b1118;border:1px solid var(--line);color:var(--txt);border-radius:6px;padding:3px 6px;font-size:13px"></div>
+    <div id="btout" style="margin-top:8px"><div class="small skel">Pick a period to run the backtest. 7 days takes about 30 seconds.</div></div>
+  </section>
+
   <section class="card">
     <h2>Track record (this device)</h2>
     <div id="track" class="small"><span class="skel">Each forecast is scored automatically once its 5-, 15- and 30-minute targets pass.</span></div>
@@ -811,6 +820,159 @@ function renderSignal(){
   box.appendChild(el("div",{cls:"tiny mut",style:"margin-top:4px",text:"Signals come from a statistical model, not a guarantee. Always use a stop-loss and only risk what you can afford to lose." + (sig.side === "BUY" ? " On Exness you buy at the Ask, which is the Bid plus the spread." : "")}));
 }
 
+// ---------- backtest ----------
+function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+function btFetch(days, progress){
+  var end = Math.floor(Date.now()/MIN)*MIN, start = end - days*1440*MIN, step = 300*MIN, byT = {}, n = 0;
+  var total = Math.ceil((end - start)/step);
+  function cbPage(e){
+    var s = Math.max(start, e - step);
+    var url = CBX + "/products/PAXG-USD/candles?granularity=60&start=" + new Date(s).toISOString() + "&end=" + new Date(e).toISOString();
+    return getJSON(url, 12000).then(function(c){
+      c.forEach(function(x){ var t = x[0]*1000 + MIN; byT[t] = { t: t, l: x[1], h: x[2], o: x[3], p: x[4] }; });
+      n++; progress("Downloading history… " + Math.round(n/total*100) + "%");
+      if(s <= start) return;
+      return sleep(180).then(function(){ return cbPage(s); });
+    });
+  }
+  function bnPage(e){
+    var url = BN[0] + "/api/v3/klines?symbol=PAXGUSDT&interval=1m&limit=1000&endTime=" + e;
+    return getJSON(url, 12000).then(function(k){
+      if(!k.length) return;
+      k.forEach(function(c){ var t = c[6] + 1; byT[t] = { t: t, o: +c[1], h: +c[2], l: +c[3], p: +c[4] }; });
+      progress("Downloading history (backup feed)… " + Object.keys(byT).length + " minutes");
+      if(k[0][0] <= start) return;
+      return sleep(150).then(function(){ return bnPage(k[0][0] - 1); });
+    });
+  }
+  return cbPage(end).catch(function(){ byT = {}; return bnPage(end); }).then(function(){
+    var rows = Object.keys(byT).map(function(k){ return byT[k]; }).sort(function(a,b){ return a.t - b.t; });
+    if(rows.length < 300) throw new Error("not enough history returned");
+    // fill minutes with no trades
+    var out = [rows[0]];
+    for(var i = 1; i < rows.length; i++){
+      var pr = out[out.length-1];
+      for(var t = pr.t + MIN; t < rows[i].t; t += MIN) out.push({ t: t, o: pr.p, h: pr.p, l: pr.p, p: pr.p });
+      out.push(rows[i]);
+    }
+    return out;
+  });
+}
+function isWeekend(t){ var d = new Date(t), wd = d.getUTCDay(), h = d.getUTCHours(); return wd === 6 || (wd === 0 && h < 23) || (wd === 5 && h >= 21); }
+function btRun(bars, spread){
+  var N = bars.length, P = bars.map(function(b){ return b.p; }), prior = 0.012/Math.sqrt(1380);
+  function sig(i){ var s = 0, n = 0; for(var k = Math.max(1, i-239); k <= i; k++){ var r = Math.log(P[k]/P[k-1]); s += r*r; n++; } return n < 20 ? prior : clamp(Math.sqrt(s/n), prior*0.4, prior*4); }
+  function emaR(a, b, n){ var k = 2/(n+1), e = P[a]; for(var j = a+1; j <= b; j++) e = P[j]*k + e*(1-k); return e; }
+  function fc(i){
+    var P0 = P[i], s1 = sig(i), comps = [];
+    var e5 = emaR(i-29, i, 5), e20 = emaR(i-29, i, 20);
+    var mz = (e5 - e20)/(P0*s1*Math.sqrt(8)), rz = Math.log(P0/P[i-15])/(s1*Math.sqrt(15));
+    var mom = tanh(0.7*mz); if(Math.abs(rz) > 2.5) mom -= 0.25*Math.sign(rz);
+    comps.push([clamp(mom,-1,1), 0.35]);
+    comps.push([clamp(tanh(Math.log(P0/bars[i-3].o)/(s1*Math.sqrt(3))/1.6),-1,1), 0.15]);
+    var W = 0, X = 0; comps.forEach(function(c){ W += c[1]; X += c[0]*c[1]; });
+    var s = (X/W)*(0.5 + 0.5*Math.min(1, W/0.8));
+    var tz = Math.log(P0/P[i-69])/(s1*Math.sqrt(69)), e30 = emaR(i-69, i, 30);
+    var tdir = tz > 0.8 && P0 > e30 ? 1 : tz < -0.8 && P0 < e30 ? -1 : 0;
+    return { s: s, pu: Phi(0.4*s), sd15: s1*Math.sqrt(15)*P0, sd30: s1*Math.sqrt(30)*P0, tdir: tdir, tstrong: Math.abs(tz) > 1.4 && tdir !== 0 };
+  }
+  var trades = [], fcs = { n15: 0, h15: 0, n30: 0, h30: 0 }, skipped = { trend: 0 }, i = 240, busyUntil = 0;
+  for(; i < N - 61; i += 5){
+    if(isWeekend(bars[i].t)) continue;
+    var f = fc(i), P0 = P[i];
+    if(Math.abs(f.s) >= 0.12){
+      var d15 = P[i+15] - P0, d30 = P[i+30] - P0;
+      if(Math.abs(d15) >= 0.05){ fcs.n15++; if((d15 > 0) === (f.s > 0)) fcs.h15++; }
+      if(Math.abs(d30) >= 0.05){ fcs.n30++; if((d30 > 0) === (f.s > 0)) fcs.h30++; }
+    }
+    if(i < busyUntil) continue;
+    var buy = f.s >= 0.22 && f.pu >= 0.54, sell = f.s <= -0.22 && f.pu <= 0.46;
+    if(f.tstrong && ((buy && f.tdir < 0) || (sell && f.tdir > 0))){ skipped.trend++; continue; }
+    if(!buy && !sell) continue;
+    var dir = buy ? 1 : -1, strong = Math.abs(f.s) >= 0.45;
+    var entry = strong ? P0 : P0 - dir*0.5*f.sd15;
+    var stop = entry - dir*1.2*f.sd30, risk = Math.abs(entry - stop), tp = entry + dir*risk;
+    var tr = { t: bars[i].t, side: buy ? "BUY" : "SELL", entry: entry, stop: stop, tp: tp, res: null, pnl: 0 };
+    var filled = strong, j;
+    for(j = i+1; j < Math.min(N, i+61); j++){
+      var b = bars[j];
+      if(!filled){
+        if(j > i+15){ tr.res = "missed"; break; }
+        if((dir > 0 && b.l <= entry) || (dir < 0 && b.h >= entry)) filled = true; else continue;
+      }
+      var hs = dir > 0 ? b.l <= stop : b.h >= stop, ht = dir > 0 ? b.h >= tp : b.l <= tp;
+      if(hs){ tr.res = "stop"; tr.pnl = -risk; break; }      // if both touched in one minute, assume the worse
+      if(ht){ tr.res = "target"; tr.pnl = risk; break; }
+    }
+    if(!tr.res){ tr.res = "expired"; j = Math.min(N-1, i+60); tr.pnl = dir*(P[j] - entry); }
+    if(tr.res !== "missed") tr.pnl -= spread;
+    tr.exitT = bars[Math.min(N-1, j)].t;
+    trades.push(tr);
+    busyUntil = j + 1;
+  }
+  return { trades: trades, fcs: fcs, skipped: skipped, from: bars[0].t, to: bars[N-1].t };
+}
+function btRender(r, spread){
+  var box = $("btout"); clear(box);
+  var tk = r.trades.filter(function(x){ return x.res !== "missed"; }), missed = r.trades.length - tk.length;
+  var wins = tk.filter(function(x){ return x.pnl > 0; }), losses = tk.filter(function(x){ return x.pnl <= 0; });
+  var net = tk.reduce(function(s,x){ return s + x.pnl; }, 0);
+  var gw = wins.reduce(function(s,x){ return s + x.pnl; }, 0), gl = -losses.reduce(function(s,x){ return s + x.pnl; }, 0);
+  var eq = 0, peak = 0, dd = 0, curve = [0];
+  tk.forEach(function(x){ eq += x.pnl; peak = Math.max(peak, eq); dd = Math.max(dd, peak - eq); curve.push(eq); });
+  var days = Math.round((r.to - r.from)/864e5*10)/10;
+  var verdict = !tk.length ? ["mut","No trades — the rules didn't find any setups in this period."] :
+    net > 0 && gl > 0 && gw/gl > 1.2 ? ["up","Profitable in this period."] :
+    net > 0 ? ["goldc","Slightly profitable — not a reliable edge yet."] : ["dn","Lost money in this period — don't trade these signals with real money yet."];
+  box.appendChild(el("div",{cls:"headline",style:"margin-top:4px"},[ el("span",{cls:verdict[0],text:verdict[1]}) ]));
+  var g = el("div",{cls:"drv"});
+  [["Period", days + " days"], ["Trades", tk.length + (missed ? " (+" + missed + " missed entry)" : "")], ["Win rate", tk.length ? Math.round(wins.length/tk.length*100) + "%" : "—"],
+   ["Net result", sgn(net,2) + " $/oz"], ["Profit factor", gl > 0 ? (gw/gl).toFixed(2) : (gw > 0 ? "∞" : "—")], ["Worst drawdown", "−$" + fmt(dd,2) + "/oz"],
+   ["Avg win", wins.length ? "+$" + fmt(gw/wins.length,2) : "—"], ["Avg loss", losses.length ? "−$" + fmt(gl/losses.length,2) : "—"],
+   ["15-min direction right", r.fcs.n15 ? Math.round(r.fcs.h15/r.fcs.n15*100) + "% of " + r.fcs.n15 : "—"]].forEach(function(x){
+    g.appendChild(el("div",{cls:"dv"},[ el("div",{cls:"k",text:x[0]}), el("div",{cls:"v",text:x[1]}) ]));
+  });
+  box.appendChild(g);
+  // equity curve
+  if(curve.length > 2){
+    var W = $("btout").clientWidth || 600, H = 140, svg = sv("svg",{viewBox:"0 0 " + W + " " + H, width:"100%", height:H});
+    var lo = Math.min.apply(null, curve), hi = Math.max.apply(null, curve); if(hi === lo){ hi += 1; lo -= 1; }
+    var X = function(k){ return 6 + k/(curve.length-1)*(W - 50); }, Y = function(v){ return 10 + (hi - v)/(hi - lo)*(H - 30); };
+    svg.appendChild(sv("line",{x1:6,x2:W-44,y1:Y(0),y2:Y(0),stroke:"#3a4556","stroke-dasharray":"3 3"}));
+    svg.appendChild(sv("path",{d:"M" + curve.map(function(v,k){ return X(k).toFixed(1) + "," + Y(v).toFixed(1); }).join("L"), fill:"none", stroke: net >= 0 ? "#22c55e" : "#ef4444", "stroke-width":2.5}));
+    var t1 = sv("text",{x:W-40,y:Y(curve[curve.length-1])+4,fill:"#e6edf5","font-size":11,"font-weight":700}); t1.textContent = sgn(net,1); svg.appendChild(t1);
+    var t2 = sv("text",{x:6,y:H-4,fill:"#8b98a9","font-size":10}); t2.textContent = "Profit over time, $/oz, after a $" + fmt(spread,2) + " spread per trade"; svg.appendChild(t2);
+    box.appendChild(el("div",{style:"margin-top:10px"},[svg]));
+  }
+  // recent trades
+  if(r.trades.length){
+    var tb = el("table",{cls:"tr",style:"margin-top:8px"});
+    tb.appendChild(el("tr",{},[el("th",{text:"Time"}),el("th",{text:"Side"}),el("th",{text:"Entry"}),el("th",{text:"Result"}),el("th",{text:"$/oz"})]));
+    r.trades.slice(-15).reverse().forEach(function(x){
+      var d = new Date(x.t);
+      tb.appendChild(el("tr",{},[ el("td",{text: d.toLocaleDateString([], {weekday:"short"}) + " " + hhmm(x.t)}), el("td",{cls: x.side === "BUY" ? "up" : "dn", text: x.side}), el("td",{text: fmt(mt(x.entry),2)}),
+        el("td",{text: ({target:"target ✓", stop:"stop ✗", expired:"closed 60m", missed:"missed"})[x.res]}), el("td",{cls: x.res === "missed" ? "mut" : cls(x.pnl), text: x.res === "missed" ? "—" : sgn(x.pnl,2)}) ]));
+    });
+    box.appendChild(el("div",{cls:"tiny mut",style:"margin-top:10px",text:"Last 15 signals:"}));
+    box.appendChild(tb);
+  }
+  box.appendChild(el("div",{cls:"tiny mut",style:"margin-top:8px",text:"Replays the price-based rules (momentum, 3-minute speed, 1-hour trend filter, entries, stops and targets) on PAXG minute data, skipping weekends. Live signals also use the dollar, order flow, order book, news and the news guard, which have no free history, so live results can differ. If a stop and target are both touched in the same minute, it counts as a loss. Past results don't guarantee future results." + (r.skipped.trend ? " The trend filter blocked " + r.skipped.trend + " counter-trend signals." : "")}));
+}
+function setupBacktest(){
+  Array.prototype.forEach.call(document.querySelectorAll("#btdays .btn"), function(b){
+    b.onclick = function(){
+      var days = +b.getAttribute("data-d"), spread = parseFloat($("btspread").value) || 0;
+      Array.prototype.forEach.call(document.querySelectorAll("#btdays .btn"), function(x){ x.disabled = true; x.className = "btn" + (x === b ? " gold" : ""); });
+      var out = $("btout"); clear(out); out.appendChild(el("div",{cls:"small mut",id:"btprog",text:"Starting…"}));
+      btFetch(days, function(t){ var p = $("btprog"); if(p) p.textContent = t; }).then(function(bars){
+        $("btprog").textContent = "Replaying " + bars.length.toLocaleString() + " minutes…";
+        return sleep(30).then(function(){ btRender(btRun(bars, spread), spread); });
+      }).catch(function(e){ clear(out); out.appendChild(el("div",{cls:"small dn",text:"Backtest failed: " + (e && e.message || "error") + ". Check your connection and try again."})); })
+      .then(function(){ Array.prototype.forEach.call(document.querySelectorAll("#btdays .btn"), function(x){ x.disabled = false; }); });
+    };
+  });
+}
+
 // ---------- rendering ----------
 function renderPrice(){
   var last = S.ticks[S.ticks.length-1]; if(!last) return;
@@ -1068,6 +1230,7 @@ document.addEventListener("visibilitychange", function(){ if(!document.hidden){ 
 renderTrack();
 setupAlerts();
 setupMT5();
+setupBacktest();
 renderEvents();
 tick();
 })();
