@@ -80,6 +80,7 @@ h2{font-size:13px;margin:0 0 10px;color:var(--mut);text-transform:uppercase;lett
 .evimp{font-size:10px;font-weight:800;padding:3px 6px;border-radius:5px}.evimp.hi{background:#7f1d1d;color:#fecaca}.evimp.md{background:#4a3a0e;color:#fde68a}
 .mt5box{margin-top:10px;background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:10px}
 .mt5box input{flex:1;min-width:0;background:#0b1118;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:7px 9px;font-size:14px}
+.tag.newtag{background:#5b9dff;color:#06101f}
 .ptitle{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px;font-weight:600}
 .lsbar{display:flex;height:22px;border-radius:7px;overflow:hidden;font-size:11px;font-weight:700}
 .lsbar div{display:flex;align-items:center;padding:0 8px;white-space:nowrap;transition:width .6s}
@@ -202,7 +203,7 @@ footer a{color:var(--mut)}
   </section>
 
   <section class="card">
-    <div class="row" style="margin-bottom:6px"><h2 style="margin:0">Gold &amp; USD news · last 2 hours</h2><span class="tiny mut" id="newsmeta"></span></div>
+    <div class="row" style="margin-bottom:6px"><h2 style="margin:0">Gold &amp; USD news · last 15 minutes</h2><span class="tiny mut" id="newsmeta"></span></div>
     <div class="small" id="newssent" style="margin-bottom:6px"></div>
     <ul class="news" id="news"><li class="skel small">Loading headlines…</li></ul>
   </section>
@@ -228,7 +229,7 @@ footer a{color:var(--mut)}
   </section>
 
   <footer>
-    100% free data, no account or key needed. Gold: spot XAU/USD from Coinbase's public exchange rates when available, otherwise PAXG (a token backed 1:1 by a London Good Delivery gold ounce that tracks spot closely), with Binance as a last backup. Dollar: euro rate from the same feed. Trades and order book: Coinbase PAXG market. News: <a href="https://www.gdeltproject.org" target="_blank" rel="noopener">GDELT</a>, scored by keywords. Prices refresh every 15 seconds; news every 5 minutes (headlines from the last 2 hours only).<br>
+    100% free data, no account or key needed. Gold: spot XAU/USD from Coinbase's public exchange rates when available, otherwise PAXG (a token backed 1:1 by a London Good Delivery gold ounce that tracks spot closely), with Binance as a last backup. Dollar: euro rate from the same feed. Trades and order book: Coinbase PAXG market. News: <a href="https://www.gdeltproject.org" target="_blank" rel="noopener">GDELT</a>, scored by keywords. Prices refresh every 15 seconds; news every 2 minutes (headlines from the last 15 minutes only).<br>
     Forecasts are statistical estimates from momentum, dollar moves, order flow and news tone, with ranges sized from recent volatility. Short-term gold moves are mostly noise; this is a decision aid, not financial advice.
   </footer>
 </div>
@@ -426,7 +427,7 @@ var RELEVANT = /gold|bullion|xau|fed\b|federal reserve|dollar|treasur|yield|infl
 function lexScore(text){ var s = 0; BULL.forEach(function(r){ if(r.test(text)) s += 1; }); BEAR.forEach(function(r){ if(r.test(text)) s -= 1; }); return clamp(s/2, -1, 1); }
 function fetchNews(){
   var q = '("gold price" OR "gold prices" OR bullion OR "spot gold" OR XAU OR "Federal Reserve" OR "dollar index" OR "Treasury yields") sourcelang:english';
-  var url = "https://api.gdeltproject.org/api/v2/doc/doc?query=" + encodeURIComponent(q) + "&mode=artlist&maxrecords=60&format=json&sort=datedesc&timespan=2h";
+  var url = "https://api.gdeltproject.org/api/v2/doc/doc?query=" + encodeURIComponent(q) + "&mode=artlist&maxrecords=60&format=json&sort=datedesc&timespan=1h";
   fetch(url, { cache: "no-store" }).then(function(r){ return r.text(); }).then(function(txt){
     var j; try{ j = JSON.parse(txt); }catch(e){ throw new Error(txt.slice(0, 80) || "bad response"); }
     var seen = {}, list = [];
@@ -439,8 +440,8 @@ function fetchNews(){
       list.push({ headline: title, src: a.domain, url: a.url, t: t, score: lexScore(title) });
     });
     list.sort(function(a,b){ return b.t - a.t; });
-    list = list.filter(function(x){ return x.t >= Date.now() - 120*MIN; });
-    if(!list.length){ srcSet("gdelt", true, "no headlines in 2h"); fetchNewsBackup(); return; }
+    S.newsAll = list.slice(0, 40); list = list.filter(function(x){ return x.t >= Date.now() - 15*MIN; });
+    if(!list.length){ srcSet("gdelt", true, "no headlines in 15 min"); fetchNewsBackup(); return; }
     S.news = list.slice(0, 25); S.newsAt = Date.now(); srcSet("gdelt", true, list.length + " headlines");
     renderNews();
   }).catch(function(e){
@@ -450,8 +451,8 @@ function fetchNews(){
 }
 // backup news: Google News search feeds, converted to JSON by the free rss2json service
 function fetchNewsBackup(){
-  var feeds = ["https://news.google.com/rss/search?q=" + encodeURIComponent("gold price OR XAUUSD OR \"spot gold\" when:2h") + "&hl=en-US&gl=US&ceid=US:en",
-               "https://news.google.com/rss/search?q=" + encodeURIComponent("\"Federal Reserve\" OR \"dollar index\" OR \"Treasury yields\" when:2h") + "&hl=en-US&gl=US&ceid=US:en"];
+  var feeds = ["https://news.google.com/rss/search?q=" + encodeURIComponent("gold price OR XAUUSD OR \"spot gold\" when:1h") + "&hl=en-US&gl=US&ceid=US:en",
+               "https://news.google.com/rss/search?q=" + encodeURIComponent("\"Federal Reserve\" OR \"dollar index\" OR \"Treasury yields\" when:1h") + "&hl=en-US&gl=US&ceid=US:en"];
   Promise.all(feeds.map(function(f){ return getJSON("https://api.rss2json.com/v1/api.json?rss_url=" + encodeURIComponent(f), 12000).catch(function(){ return null; }); })).then(function(rs){
     var seen = {}, list = [];
     rs.forEach(function(j){ (j && j.items || []).forEach(function(it){
@@ -462,7 +463,7 @@ function fetchNewsBackup(){
       var src = (it.title || "").match(/\s-\s([^-]+)$/); 
       list.push({ headline: title, src: src ? src[1].trim() : "Google News", url: it.link, t: t, score: lexScore(title) });
     }); });
-    list = list.filter(function(x){ return x.t >= Date.now() - 120*MIN; });
+    S.newsAll = list.slice(0, 40); list = list.filter(function(x){ return x.t >= Date.now() - 15*MIN; });
     list.sort(function(a,b){ return b.t - a.t; });
     S.news = list.slice(0, 25); S.newsAt = Date.now(); srcSet("gnews", true, list.length + " headlines");
     renderNews();
@@ -473,7 +474,7 @@ function fetchNewsBackup(){
 }
 function newsScore(){
   var now = Date.now(), n = 0, d = 0;
-  S.news.forEach(function(x){ var age = (now - x.t)/MIN; if(age > 120 || age < -5) return; var w = Math.exp(-age/60); n += w*x.score; d += w; });
+  S.news.forEach(function(x){ var age = (now - x.t)/MIN; if(age > 15 || age < -5) return; var w = Math.exp(-age/10); n += w*x.score; d += w; });
   return d > 0.05 ? clamp(n/d, -1, 1) : null;
 }
 
@@ -528,7 +529,7 @@ function computeForecast(){
     comps.push({ k: "Order book", v: clamp(tanh(imb/0.4)*0.8,-1,1), w: 0.1, note: Math.round(S.book.bid/(S.book.bid+S.book.ask)*100) + "% resting bids" });
   }
   var ns = newsScore();
-  if(ns != null) comps.push({ k: "News tone", v: ns, w: 0.15, note: S.news.length + " headlines, last 2h" });
+  if(ns != null) comps.push({ k: "News tone", v: ns, w: 0.15, note: S.news.length + " headlines, last 15m" });
   var W = 0, X = 0; comps.forEach(function(c){ W += c.w; X += c.w*c.v; });
   var s = W ? X/W : 0; s *= (0.5 + 0.5*Math.min(1, W/0.8));
   var EDGE = 0.4, path = [];
@@ -1151,15 +1152,18 @@ function renderDrivers(){
   var s = sigma1m()*Math.sqrt(30)*(S.ticks.length ? S.ticks[S.ticks.length-1].p : 0);
   d.appendChild(dv("Volatility (30m swing)", "±$" + fmt(s,2), s > 8 ? "▲ choppy — wider ranges" : "• calm", 0));
   var tr = trendInfo(); if(tr) d.appendChild(dv("1-hour trend", sgn(tr.move,2), tr.dir > 0 ? "▲ " + tr.label : tr.dir < 0 ? "▼ " + tr.label : "• " + tr.label, tr.dir));
-  var ns = newsScore(); if(ns != null){ var e5 = ns > 0.1 ? 1 : ns < -0.1 ? -1 : 0; d.appendChild(dv("News tone (2h)", sgn(ns,2), lab(e5), e5)); }
+  var ns = newsScore(); if(ns != null){ var e5 = ns > 0.1 ? 1 : ns < -0.1 ? -1 : 0; d.appendChild(dv("News tone (15m)", sgn(ns,2), lab(e5), e5)); }
 }
 function renderNews(){
   var ul = $("news"); clear(ul);
-  S.news = S.news.filter(function(x){ return x.t >= Date.now() - 120*MIN; });
-  if(!S.news.length) ul.appendChild(el("li",{cls:"small mut",text:"No gold or US dollar headlines in the last 2 hours. Checks again every 5 minutes."}));
+  S.news = S.news.filter(function(x){ return x.t >= Date.now() - 15*MIN; });
+  if(!S.news.length){
+    var latest = (S.newsAll || []).filter(function(x){ return x.t < Date.now() - 15*MIN; })[0];
+    ul.appendChild(el("li",{cls:"small mut",text:"No new gold or US dollar headlines in the last 15 minutes — checking every 2 minutes." + (latest ? " Latest was " + ago(latest.t) + ": \u201c" + latest.headline + "\u201d" : "")}));
+  }
   S.news.forEach(function(n){
     var t = n.score > 0.15 ? ["bull","Bullish"] : n.score < -0.15 ? ["bear","Bearish"] : ["neu","Neutral"];
-    ul.appendChild(el("li",{},[ el("div",{},[ el("span",{cls:"tag " + t[0], text: t[1]}), el("a",{href: n.url, target:"_blank", rel:"noopener", text: n.headline}) ]), el("div",{cls:"tiny mut", text: (n.src || "") + " · " + ago(n.t)}) ]));
+    ul.appendChild(el("li",{},[ el("div",{},[ (Date.now() - n.t < 5*MIN ? el("span",{cls:"tag newtag", text:"NEW"}) : null), el("span",{cls:"tag " + t[0], text: t[1]}), el("a",{href: n.url, target:"_blank", rel:"noopener", text: n.headline}) ]), el("div",{cls:"tiny mut", text: (n.src || "") + " · " + ago(n.t)}) ]));
   });
   $("newsmeta").textContent = S.newsAt ? "Updated " + hhmm(S.newsAt) : "";
   var ns = newsScore(), s = $("newssent"); clear(s);
@@ -1308,7 +1312,8 @@ function tick(){
   // refresh prices every 15 seconds
   var ps = Math.floor(now/15000);
   if(ps !== lastPriceSlot){ lastPriceSlot = ps; fetchPrices().then(fetchBook); }
-  if(now - lastNewsAt >= 5*MIN){ lastNewsAt = now; fetchNews(); fetchCalendar(false); }
+  if(now - lastNewsAt >= 2*MIN){ lastNewsAt = now; fetchNews(); }
+  if(now - (S.calTick || 0) >= 10*MIN){ S.calTick = now; fetchCalendar(false); }
 }
 setInterval(tick, 1000);
 setInterval(function(){ checkNewsAlert(); renderEvents(); }, 30000);
